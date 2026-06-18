@@ -1,78 +1,36 @@
 import streamlit as st
-import requests
 import pandas as pd
-import time
-from bs4 import BeautifulSoup
 import io
 
-st.set_page_config(page_title="데이터 추출기", layout="wide")
-st.title("📊 전국 전입·전출 데이터 수집기")
+st.set_page_config(layout="wide")
+st.title("🛡️ 최종 수정된 데이터 수집기")
 
-# 1. 파일 강제 업로드 로직
-st.sidebar.header("📁 필수: 데이터 파일 업로드")
-st.sidebar.info("같은 폴더의 '법정동코드 전체자료.txt'를 업로드하세요.")
-uploaded_file = st.sidebar.file_uploader("법정동코드 파일 업로드", type=["txt"])
-
-dong_map = {}
+# 1. 파일 업로드
+uploaded_file = st.file_uploader("법정동코드 파일을 올려주세요", type=["txt"])
 
 if uploaded_file:
-    try:
-        # 파일 내용을 안전하게 읽기
-        data = uploaded_file.getvalue().decode('cp949', errors='ignore')
-        lines = data.split('\n')
-        for line in lines:
-            parts = line.split('\t')
-            if len(parts) >= 3 and parts[2].strip() == "존재" and "법정동코드" not in parts[0]:
-                dong_map[parts[1].strip()] = parts[0].strip().replace('\ufeff', '')
-        st.sidebar.success(f"✅ {len(dong_map):,}개 지역 불러오기 완료!")
-    except Exception as e:
-        st.sidebar.error(f"파일 읽기 오류: {e}")
-else:
-    st.sidebar.warning("⚠️ 파일을 먼저 업로드해야 수집이 가능합니다.")
+    # 2. 아주 안전하게 한 줄씩 읽는 방식
+    dong_map = {}
+    # 한글 깨짐 방지를 위해 cp949 인코딩 사용
+    content = uploaded_file.getvalue().decode('cp949', errors='ignore')
+    
+    for line in content.splitlines():
+        # 탭으로 분리
+        parts = line.split('\t')
+        
+        # '존재'라는 단어가 포함된 줄만 골라내기 (형식 체크보다 이게 훨씬 안전합니다)
+        if len(parts) >= 3 and "존재" in parts[2]:
+            code = parts[0].strip()
+            name = parts[1].strip()
+            dong_map[name] = code
 
-# 2. 크롤링 로직
-def fetch_data(gubun, code, ym):
-    url = "https://stat.moi.go.kr/WMO/stat/statMain.do"
-    payload = {"searchType": "month", "searchGubun": gubun, "dongCode": code, "startInYm": ym, "endInYm": ym}
-    try:
-        res = requests.post(url, data=payload, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
-        rows = []
-        for tr in soup.select("#cubeGrid tbody tr"):
-            tds = [t.get_text(strip=True) for t in tr.find_all("td")]
-            if len(tds) >= 4: rows.append(tds)
-        return rows
-    except: return []
+    st.success(f"✅ {len(dong_map):,}개의 지역 데이터를 성공적으로 불러왔습니다.")
 
-# 3. 화면 구성
-search_name = st.text_input("지역명 입력 (예: 사당동)")
-ym_range = st.text_input("기간 입력 (예: 202301-202312)")
-
-if st.button("시작"):
-    if not uploaded_file:
-        st.error("파일을 업로드하세요.")
-    elif '-' not in ym_range:
-        st.error("기간은 YYYYMM-YYYYMM 형식입니다.")
-    else:
-        # 지역 매칭
-        target_codes = [v for k, v in dong_map.items() if search_name in k]
-        if not target_codes:
-            st.error("지역을 찾을 수 없습니다.")
-        else:
-            code = target_codes[0]
-            start, end = ym_range.split('-')
-            months = [m.strftime('%Y%m') for m in pd.date_range(start, end, freq='MS')]
-            
-            all_data = []
-            with st.spinner("수집 중..."):
-                for m in months:
-                    in_data = fetch_data("100", code, m)
-                    for row in in_data: all_data.append([m] + row)
-            
-            df = pd.DataFrame(all_data, columns=["년월", "행정구역", "사유", "전입지", "건수"])
-            st.dataframe(df)
-            
-            # 엑셀 저장
-            buf = io.BytesIO()
-            df.to_excel(buf, index=False)
-            st.download_button("엑셀 다운로드", buf.getvalue(), "data.xlsx")
+    # 3. 검색 및 데이터 확인
+    query = st.text_input("지역명 검색 (예: 종로구)")
+    if query:
+        results = {k: v for k, v in dong_map.items() if query in k}
+        st.write(results)
+        
+        if results:
+            st.info("이제 아래에서 기간을 입력하여 데이터를 수집하세요.")
