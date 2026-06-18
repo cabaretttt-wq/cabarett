@@ -9,17 +9,14 @@ import os
 st.set_page_config(page_title="전국 전입전출 데이터 추출기", layout="wide")
 
 st.title("📊 전국 전입·전출 데이터 수집 자동화 시스템")
-st.caption("텍스트 파일 매칭 엔진 안정화 버전")
+st.caption("빈 줄 및 헤더 IndexError 원천 차단 통합 버전")
 
 # =============================================
-# 1. 로컬 텍스트 파일 로드 (가장 안전하고 단순한 구조)
+# 1. 로컬 텍스트 파일 로드 (모든 예외 상황 방어)
 # =============================================
 DATA_FILE_NAME = "법정동코드 전체자료.txt"
 
-def load_dong_map_simple():
-    """
-    텍스트 파일에서 데이터를 읽어와 안전하게 맵을 구성합니다.
-    """
+def load_dong_map_perfect():
     dong_map = {}
     if not os.path.exists(DATA_FILE_NAME):
         return None
@@ -31,30 +28,31 @@ def load_dong_map_simple():
         with open(DATA_FILE_NAME, 'r', encoding='cp949') as f:
             text_data = f.read()
         
-    lines = text_data.strip().split('\n')
+    lines = text_data.split('\n')
     for line in lines:
+        # [핵심 방어] 빈 줄이거나 공백만 있는 줄은 에러 없이 그냥 패스합니다.
         if not line.strip():
             continue
             
         parts = line.split('\t')
+        # [핵심 방어] 탭 분리 후 데이터 개수가 부족하면 IndexError를 내지 않고 패스합니다.
         if len(parts) < 3:
             continue
             
         code = parts[0].strip()       # 10자리 코드
-        dong_name = parts[1].strip()  # 전체 지역명 (예: 서울특별시 동작구 사당동)
+        dong_name = parts[1].strip()  # 전체 구역명
         status = parts[2].strip()     # 존재 여부
         
-        # 첫 줄 헤더이거나 '존재' 상태가 아니면 제외
+        # 첫 줄 헤더이거나 폐지된 코드는 제외
         if code == "법정동코드" or status != "존재":
             continue
             
-        # 전체 주소명을 키(Key)로, 10자리 코드를 값(Value)으로 저장
         dong_map[dong_name] = str(code)
                 
     return dong_map
 
 # 마스터 데이터베이스 로드
-master_dong_map = load_dong_map_simple()
+master_dong_map = load_dong_map_perfect()
 
 # 사이드바 데이터베이스 상태 표시
 st.sidebar.header("📁 데이터베이스 상태")
@@ -62,7 +60,7 @@ if master_dong_map is not None:
     st.sidebar.success(f"✅ 법정동코드 파일 연동 완료\n(전국 {len(master_dong_map):,}개 구역 활성화)")
 else:
     st.sidebar.error(f"❌ '{DATA_FILE_NAME}' 파일이 없습니다.")
-    st.sidebar.info("💡 app.py 파일과 같은 위치(폴더)에 '법정동코드 전체자료.txt' 파일을 넣어주세요.")
+    st.sidebar.info("💡 app.py 파일과 같은 폴더에 '법정동코드 전체자료.txt' 파일을 넣어주세요.")
     
     uploaded_file = st.sidebar.file_uploader("또는 여기에 직접 텍스트 파일을 업로드하세요.", type=["txt"])
     if uploaded_file is not None:
@@ -70,7 +68,7 @@ else:
             bytes_data = uploaded_file.read()
             text_str = bytes_data.decode('utf-8') if b'\xef\xbb\xbf' in bytes_data else bytes_data.decode('cp949')
             master_dong_map = {}
-            for line in text_str.strip().split('\n'):
+            for line in text_str.split('\n'):
                 if not line.strip(): continue
                 parts = line.split('\t')
                 if len(parts) >= 3 and parts[2].strip() == "존재" and parts[0].strip() != "법정동코드":
@@ -105,7 +103,6 @@ def fetch_all_rows(search_gubun, target_dong_code, fr_ym, to_ym):
     for dt in date_range:
         current_ym = dt.strftime('%Y%m')
         
-        # 10자리 코드를 문자열 형태로 바인딩하여 안전하게 요청
         payload = {
             "searchType": "month",
             "searchGubun": str(search_gubun),   # 전입(100), 전출(200)
