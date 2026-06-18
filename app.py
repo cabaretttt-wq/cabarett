@@ -5,17 +5,19 @@ import time
 from bs4 import BeautifulSoup
 import io
 import os
+import traceback
 
 st.set_page_config(page_title="전국 전입전출 데이터 추출기", layout="wide")
 
 st.title("📊 전국 전입·전출 데이터 수집 자동화 시스템")
-st.caption("빈 줄 및 헤더 IndexError 원천 차단 통합 버전")
+st.caption("안정성 극대화 및 무결점 에러 방어 버전")
 
 # =============================================
 # 1. 로컬 텍스트 파일 로드 (모든 예외 상황 방어)
 # =============================================
 DATA_FILE_NAME = "법정동코드 전체자료.txt"
 
+@st.cache_data
 def load_dong_map_perfect():
     dong_map = {}
     if not os.path.exists(DATA_FILE_NAME):
@@ -25,26 +27,27 @@ def load_dong_map_perfect():
         with open(DATA_FILE_NAME, 'r', encoding='utf-8') as f:
             text_data = f.read()
     except UnicodeDecodeError:
-        with open(DATA_FILE_NAME, 'r', encoding='cp949') as f:
-            text_data = f.read()
-        
+        try:
+            with open(DATA_FILE_NAME, 'r', encoding='cp949') as f:
+                text_data = f.read()
+        except Exception:
+            return {} # 읽기 완전 실패 시 빈 딕셔너리 반환
+            
     lines = text_data.split('\n')
     for line in lines:
-        # [핵심 방어] 빈 줄이거나 공백만 있는 줄은 에러 없이 그냥 패스합니다.
         if not line.strip():
             continue
             
         parts = line.split('\t')
-        # [핵심 방어] 탭 분리 후 데이터 개수가 부족하면 IndexError를 내지 않고 패스합니다.
         if len(parts) < 3:
             continue
             
-        code = parts[0].strip()       # 10자리 코드
-        dong_name = parts[1].strip()  # 전체 구역명
-        status = parts[2].strip()     # 존재 여부
+        # BOM 및 불필요한 공백 제거
+        code = parts[0].strip().replace('\ufeff', '')       
+        dong_name = parts[1].strip()  
+        status = parts[2].strip()     
         
-        # 첫 줄 헤더이거나 폐지된 코드는 제외
-        if code == "법정동코드" or status != "존재":
+        if "법정동코드" in code or status != "존재":
             continue
             
         dong_map[dong_name] = str(code)
@@ -56,10 +59,10 @@ master_dong_map = load_dong_map_perfect()
 
 # 사이드바 데이터베이스 상태 표시
 st.sidebar.header("📁 데이터베이스 상태")
-if master_dong_map is not None:
+if master_dong_map is not None and len(master_dong_map) > 0:
     st.sidebar.success(f"✅ 법정동코드 파일 연동 완료\n(전국 {len(master_dong_map):,}개 구역 활성화)")
 else:
-    st.sidebar.error(f"❌ '{DATA_FILE_NAME}' 파일이 없습니다.")
+    st.sidebar.error(f"❌ '{DATA_FILE_NAME}' 파일이 없거나 읽을 수 없습니다.")
     st.sidebar.info("💡 app.py 파일과 같은 폴더에 '법정동코드 전체자료.txt' 파일을 넣어주세요.")
     
     uploaded_file = st.sidebar.file_uploader("또는 여기에 직접 텍스트 파일을 업로드하세요.", type=["txt"])
@@ -71,8 +74,8 @@ else:
             for line in text_str.split('\n'):
                 if not line.strip(): continue
                 parts = line.split('\t')
-                if len(parts) >= 3 and parts[2].strip() == "존재" and parts[0].strip() != "법정동코드":
-                    master_dong_map[parts[1].strip()] = parts[0].strip()
+                if len(parts) >= 3 and parts[2].strip() == "존재" and "법정동코드" not in parts[0]:
+                    master_dong_map[parts[1].strip()] = parts[0].strip().replace('\ufeff', '')
             st.sidebar.success(f"✅ 업로드 완료! ({len(master_dong_map):,}개)")
         except Exception as e:
             st.sidebar.error(f"파일 읽기 실패: {e}")
@@ -105,7 +108,7 @@ def fetch_all_rows(search_gubun, target_dong_code, fr_ym, to_ym):
         
         payload = {
             "searchType": "month",
-            "searchGubun": str(search_gubun),   # 전입(100), 전출(200)
+            "searchGubun": str(search_gubun),   
             "dongCode": str(target_dong_code).strip(),  
             "startInYm": str(current_ym),
             "endInYm": str(current_ym)
@@ -142,7 +145,6 @@ with col1:
 with col2:
     target_ym = st.text_input("📅 조회 기간 (예: 202301-202312)", value="202301-202312")
 
-# 사용자가 입력한 키워드가 풀네임 주소에 '포함'되어 있는지 체크하여 매칭
 matched_dongs = {}
 if search_query:
     query_str = search_query.strip()
@@ -160,7 +162,7 @@ if matched_dongs:
 else:
     if not master_dong_map:
         st.warning("⚠️ 왼쪽 사이드바 상태를 확인하시거나 '법정동코드 전체자료.txt' 파일을 연결해 주세요.")
-    else:
+    elif search_query:
         st.error("❌ 일치하는 지역을 찾을 수 없습니다. 검색어를 짧게 입력해 보세요. (예: 사당동 -> 사당)")
 
 if "excel_file_bytes" not in st.session_state:
@@ -179,7 +181,28 @@ if st.button("🚀 데이터 일괄 수집 시작", type="primary"):
         status_text = st.empty()
         
         try:
-            fr_ym, to_ym = target_ym.split('-')
+            # [방어 1] 날짜 형식 검증
+            if '-' not in target_ym:
+                st.error("❌ '조회 기간' 칸에 하이픈(-)이 빠져있습니다. 예: 202301-202312 형식으로 입력해주세요.")
+                st.stop()
+                
+            fr_ym, to_ym = target_ym.split('-', 1)
+            fr_ym = fr_ym.strip()
+            to_ym = to_ym.strip()
+            
+            if len(fr_ym) != 6 or len(to_ym) != 6 or not fr_ym.isdigit() or not to_ym.isdigit():
+                st.error("❌ '조회 기간' 날짜 형식이 잘못되었습니다. YYYYMM 형식의 6자리 숫자로 입력해주세요. (예: 202301)")
+                st.stop()
+
+            # [방어 2] 엑셀 라이브러리 검증
+            try:
+                import openpyxl
+            except ImportError:
+                st.error("🚨 **[필수 라이브러리 누락]** 엑셀 파일 생성을 위해 `openpyxl` 패키지가 필요합니다.\n\n"
+                         "**해결 방법:** 실행 중인 터미널(CMD) 창에서 `Ctrl + C`를 눌러 프로그램을 끈 뒤, 아래 명령어를 입력하고 엔터를 치세요.\n\n"
+                         "`pip install openpyxl`\n\n"
+                         "설치가 완료되면 다시 `streamlit run app.py` 로 실행해주세요.")
+                st.stop()
             
             IN_CODE = "100"
             OUT_CODE = "200"
@@ -187,13 +210,11 @@ if st.button("🚀 데이터 일괄 수집 시작", type="primary"):
             all_in_rows = []
             all_out_rows = []
             
-            # 1. 전입 수집
             status_text.text(f"🔄 [{selected_dong_name}] 전입 데이터 수집 중...")
             in_res = fetch_all_rows(IN_CODE, target_dong_code, fr_ym, to_ym)
             if in_res: all_in_rows.extend(in_res)
             progress_bar.progress(0.4)
             
-            # 2. 전출 수집
             status_text.text(f"🔄 [{selected_dong_name}] 전출 데이터 수집 중...")
             out_res = fetch_all_rows(OUT_CODE, target_dong_code, fr_ym, to_ym)
             if out_res: all_out_rows.extend(out_res)
@@ -205,21 +226,25 @@ if st.button("🚀 데이터 일괄 수집 시작", type="primary"):
             df_out = pd.DataFrame(all_out_rows)
             
             if df_in.empty:
-                df_in = pd.DataFrame([{"결과": "해당 기간 내 전입 데이터가 존재하지 않습니다."}])
+                df_in = pd.DataFrame([{"결과": f"{fr_ym}~{to_ym} 기간 내 전입 데이터가 없습니다."}])
             if df_out.empty:
-                df_out = pd.DataFrame([{"결과": "해당 기간 내 전출 데이터가 존재하지 않습니다."}])
+                df_out = pd.DataFrame([{"결과": f"{fr_ym}~{to_ym} 기간 내 전출 데이터가 없습니다."}])
             
-            # 메모리 내에 데이터 엑셀화
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
                 df_in.to_excel(writer, index=False, sheet_name="전입_원본")
                 df_out.to_excel(writer, index=False, sheet_name="전출_원본")
                 
+                # [방어 3] 엑셀 열 너비 조정 안전 처리
                 for sheet_name in writer.sheets:
                     ws = writer.sheets[sheet_name]
                     for col in ws.columns:
-                        max_len = max(len(str(cell.value or "")) for cell in col) + 4
-                        ws.column_dimensions[col[0].column_letter].width = max(max_len, 12)
+                        if not col: continue
+                        max_len = 0
+                        for cell in col:
+                            if cell.value:
+                                max_len = max(max_len, len(str(cell.value)))
+                        ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 30)
                         
             st.session_state.excel_file_bytes = excel_buffer.getvalue()
             st.session_state.excel_filename = f"{selected_dong_name.replace(' ', '_')}_전입전출_{fr_ym}_{to_ym}.xlsx"
@@ -229,9 +254,10 @@ if st.button("🚀 데이터 일괄 수집 시작", type="primary"):
             st.success(f"🎉 성공적으로 추출되었습니다! (전입: {len(all_in_rows):,}행 / 전출: {len(all_out_rows):,}행)")
             
         except Exception as e:
-            st.error(f"수집 프로세스 중 오류가 발생했습니다: {e}")
+            st.error("🚨 수집 프로세스 중 예기치 못한 오류가 발생했습니다. 아래 내용이 표시된다면 전체를 복사해서 제게 알려주세요.")
+            with st.expander("에러 상세 내용 보기 (클릭)"):
+                st.code(traceback.format_exc())
 
-# 다운로드 컴포넌트 활성화
 if st.session_state.excel_file_bytes is not None:
     st.write("---")
     st.subheader("📦 수집 완료된 엑셀 파일 다운로드")
