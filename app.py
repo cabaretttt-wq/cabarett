@@ -9,18 +9,18 @@ import os
 st.set_page_config(page_title="전국 전입전출 데이터 추출기 PRO", layout="wide")
 
 st.title("📊 전국 전입·전출 데이터 수집 자동화 시스템")
-st.caption("로컬 텍스트 파일 매칭 및 10자리 행정코드 규격 완전 교정 버전")
+st.caption("텍스트 파일 첫 줄 오류 해결 및 10자리 코드 보존 검증 버전")
 
 # =============================================
-# 1. 텍스트 파일 로드 및 10자리 코드 보존 처리
+# 1. 로컬 텍스트 파일 로드 (헤더 및 빈 줄 에러 방지)
 # =============================================
 DATA_FILE_NAME = "법정동코드 전체자료.txt"
 
 @st.cache_data
-def load_dong_map_verified():
+def load_dong_map_safe():
     """
-    텍스트 파일에서 '존재' 상태인 코드를 읽어옵니다.
-    행안부 서버 규격인 10자리 문자열 형태를 그대로 보존합니다.
+    텍스트 파일에서 데이터를 안전하게 읽어옵니다.
+    첫 줄 제목이나 중간 빈 줄로 인해 IndexError가 나는 현상을 완벽히 방지합니다.
     """
     dong_map = {}
     if not os.path.exists(DATA_FILE_NAME):
@@ -35,20 +35,28 @@ def load_dong_map_verified():
         
     lines = text_data.strip().split('\n')
     for line in lines:
-        parts = line.split('\t')
-        if len(parts) >= 3:
-            code = parts[0].strip()       # 10자리 고유 코드
-            dong_name = parts[1].strip()  # 행정/법정구역명
-            status = parts[2].strip()     # 존재 여부
+        if not line.strip(): # 빈 줄은 건너뜀
+            continue
             
-            if status == "존재":
-                # 코드가 잘리지 않도록 10자리 형태 그대로 저장
-                dong_map[dong_name] = code
+        parts = line.split('\t')
+        if len(parts) < 3: # 정상적인 데이터 구조가 아니면 건너뜀 (에러 방지)
+            continue
+            
+        code = parts[0].strip()       # 10자리 코드
+        dong_name = parts[1].strip()  # 구역명
+        status = parts[2].strip()     # 존재 여부
+        
+        # 첫 줄 헤더 명칭 필터링 및 '존재' 상태만 수집
+        if code == "법정동코드" or status != "존재":
+            continue
+            
+        # 행안부 서버 전송용 10자리 문자열 포맷 그대로 유지
+        dong_map[dong_name] = str(code)
                 
     return dong_map
 
-# 데이터베이스 로드
-master_dong_map = load_dong_map_verified()
+# 안전한 데이터베이스 로드
+master_dong_map = load_dong_map_safe()
 
 # 사이드바 데이터베이스 상태 표시
 st.sidebar.header("📁 데이터베이스 상태")
@@ -56,7 +64,7 @@ if master_dong_map is not None:
     st.sidebar.success(f"✅ 법정동코드 파일 연동 완료\n(전국 {len(master_dong_map):,}개 구역 활성화)")
 else:
     st.sidebar.error(f"❌ '{DATA_FILE_NAME}' 파일이 없습니다.")
-    st.sidebar.info("💡 app.py와 같은 폴더 안에 '법정동코드 전체자료.txt' 파일을 넣어두시면 자동으로 인식합니다.")
+    st.sidebar.info("💡 app.py 파일이 있는 폴더 안에 '법정동코드 전체자료.txt' 파일을 같이 넣어주세요.")
     
     uploaded_file = st.sidebar.file_uploader("또는 여기에 직접 텍스트 파일을 업로드하세요.", type=["txt"])
     if uploaded_file is not None:
@@ -65,8 +73,9 @@ else:
             text_str = bytes_data.decode('utf-8') if b'\xef\xbb\xbf' in bytes_data else bytes_data.decode('cp949')
             master_dong_map = {}
             for line in text_str.strip().split('\n'):
+                if not line.strip(): continue
                 parts = line.split('\t')
-                if len(parts) >= 3 and parts[2].strip() == "존재":
+                if len(parts) >= 3 and parts[2].strip() == "존재" and parts[0].strip() != "법정동코드":
                     master_dong_map[parts[1].strip()] = parts[0].strip()
             st.sidebar.success(f"✅ 업로드 완료! ({len(master_dong_map):,}개)")
         except Exception as e:
@@ -80,7 +89,7 @@ if master_dong_map is None:
 # =============================================
 def fetch_all_rows(search_gubun, target_dong_code, fr_ym, to_ym, progress_bar, status_text):
     """
-    행정안전부 인구통계 서버에 세션을 열고 10자리 정식 코드를 전송하여 데이터를 수집합니다.
+    행정안전부 서버가 거부하지 않도록 10자리 정식 코드를 문자열 그대로 정확히 전송합니다.
     """
     url = "https://stat.moi.go.kr/WMO/stat/statMain.do"
     headers = {
@@ -101,13 +110,13 @@ def fetch_all_rows(search_gubun, target_dong_code, fr_ym, to_ym, progress_bar, s
     for dt in date_range:
         current_ym = dt.strftime('%Y%m')
         
-        # [교정] 무조건 10자리 포맷 그대로 서버로 전달되도록 수정
+        # 10자리 코드를 온전하게 문자열 형태로 바인딩
         payload = {
             "searchType": "month",
-            "searchGubun": search_gubun,   # 전입(100) 또는 전출(200)
+            "searchGubun": str(search_gubun),   # 전입(100) 또는 전출(200)
             "dongCode": str(target_dong_code).strip(),  
-            "startInYm": current_ym,
-            "endInYm": current_ym
+            "startInYm": str(current_ym),
+            "endInYm": str(current_ym)
         }
         
         try:
@@ -126,7 +135,7 @@ def fetch_all_rows(search_gubun, target_dong_code, fr_ym, to_ym, progress_bar, s
                             "전입지/전출지": cols[2],
                             "이동인구수(명)": cols[3]
                         })
-            time.sleep(0.1) # 차단 방지 지연
+            time.sleep(0.15) # 차단 방지를 위한 최소한의 안전 시간 설정
         except Exception:
             pass
             
@@ -141,21 +150,20 @@ with col1:
 with col2:
     target_ym = st.text_input("📅 조회 기간 (예: 202301-202312)", value="202301-202312")
 
-# 검색어 기반 매칭 필터링
+# 검색 매칭 시스템
 matched_dongs = {}
 if search_query:
     matched_dongs = {k: v for k, v in master_dong_map.items() if search_query.strip() in k}
 
 if matched_dongs:
     selected_dong_name = st.selectbox("📌 매칭된 전국 행정/법정동 선택", list(matched_dongs.keys()))
-    # 10자리 코드를 온전히 가져옴
     target_dong_code = matched_dongs[selected_dong_name]
-    st.info(f"📍 선택된 지역: `{selected_dong_name}` | 전송용 10자리 코드: `{target_dong_code}`")
+    st.info(f"📍 선택된 지역: `{selected_dong_name}` | 전송용 10자리 고유코드: `{target_dong_code}`")
 else:
     if not master_dong_map:
-        st.warning("⚠️ 왼쪽 사이드바 확인 후 '법정동코드 전체자료.txt' 파일을 매핑해 주세요.")
+        st.warning("⚠️ 왼쪽 사이드바 상태를 확인하시거나 '법정동코드 전체자료.txt' 파일을 매핑해 주세요.")
     else:
-        st.error("❌ 일치하는 구역을 찾을 수 없습니다. 키워드를 확인해 주세요.")
+        st.error("❌ 일치하는 지역을 찾을 수 없습니다. 키워드를 확인해 주세요.")
 
 if "excel_file_bytes" not in st.session_state:
     st.session_state.excel_file_bytes = None
@@ -163,11 +171,11 @@ if "excel_filename" not in st.session_state:
     st.session_state.excel_filename = ""
 
 # =============================================
-# 4. 수집 실행 및 엑셀 멀티 시트 마스터 빌드
+# 4. 수집 실행 및 엑셀 다운로드 빌드
 # =============================================
 if st.button("🚀 데이터 일괄 수집 시작", type="primary"):
     if not matched_dongs:
-        st.warning("유효한 지역 코드가 매칭되지 않았습니다.")
+        st.warning("유효한 지역 코드가 연동되지 않았습니다.")
     else:
         progress_bar = st.progress(0.0)
         status_text = st.empty()
@@ -181,19 +189,19 @@ if st.button("🚀 데이터 일괄 수집 시작", type="primary"):
             all_in_rows = []
             all_out_rows = []
             
-            # 1. 전입 데이터 수집
+            # 1. 전입 데이터 크롤링
             status_text.text(f"🔄 [{selected_dong_name}] 전입 데이터 추출 중...")
             in_res = fetch_all_rows(IN_CODE, target_dong_code, fr_ym, to_ym, progress_bar, status_text)
             if in_res: all_in_rows.extend(in_res)
             progress_bar.progress(0.4)
             
-            # 2. 전출 데이터 수집
+            # 2. 전출 데이터 크롤링
             status_text.text(f"🔄 [{selected_dong_name}] 전출 데이터 추출 중...")
             out_res = fetch_all_rows(OUT_CODE, target_dong_code, fr_ym, to_ym, progress_bar, status_text)
             if out_res: all_out_rows.extend(out_res)
             progress_bar.progress(0.8)
             
-            status_text.text("✨ 수집 완료! 엑셀 파일 변환 작업 중...")
+            status_text.text("✨ 추출 완료! 다운로드 파일 구성 중...")
             
             df_in = pd.DataFrame(all_in_rows)
             df_out = pd.DataFrame(all_out_rows)
@@ -203,7 +211,7 @@ if st.button("🚀 데이터 일괄 수집 시작", type="primary"):
             if df_out.empty:
                 df_out = pd.DataFrame([{"결과": "해당 기간 내 전출 데이터가 존재하지 않습니다."}])
             
-            # 가상 메모리 버퍼에 멀티 시트 구성
+            # 가상 버퍼 상에 엑셀 멀티 시트 마스터링
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
                 df_in.to_excel(writer, index=False, sheet_name="전입_원본")
@@ -220,12 +228,12 @@ if st.button("🚀 데이터 일괄 수집 시작", type="primary"):
             
             progress_bar.progress(1.0)
             status_text.empty()
-            st.success(f"🎉 데이터 추출 완료 (전입: {len(all_in_rows):,}행 / 전출: {len(all_out_rows):,}행)")
+            st.success(f"🎉 성공적으로 추출되었습니다! (전입: {len(all_in_rows):,}행 / 전출: {len(all_out_rows):,}행)")
             
         except Exception as e:
-            st.error(f"작업 진행 중 오류 발생: {e}")
+            st.error(f"수집 가동 중 오류가 발생했습니다: {e}")
 
-# 물리 다운로드 버튼 활성화
+# 다운로드 컴포넌트 출력
 if st.session_state.excel_file_bytes is not None:
     st.write("---")
     st.subheader("📦 수집 완료된 엑셀 파일 다운로드")
